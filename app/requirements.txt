@@ -1,0 +1,2 @@
+Flask==2.3.3
+flask-pymongo==2.3.0

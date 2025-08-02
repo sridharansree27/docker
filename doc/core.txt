@@ -1,0 +1,238 @@
+IMAGE
+After building a Docker image using a Dockerfile, the image is internally made up of the following components
+
+Components of Docker Image
+config.json (Image Brain)
+	• Stores all the configuration metadata associated with the image
+	• Acts like the blueprint or brain of the image, defining how containers should behave when started from it
+
+	Key Information Stored
+	• CMD and ENTRYPOINT – What process to run when the container starts
+	• Environment Variables – Default values set with ENV instructions in the Dockerfile
+	• User – Which user to run the container
+	• Labels – Key-value metadata tags defined via LABEL
+	• Working Directory – Path set via WORKDIR for command execution
+	• Volumes – Paths defined with VOLUME that should be treated as mount points
+
+	{
+	  "architecture": "amd64",
+	  "os": "linux",
+	  "config": {
+	    "User": "sridharan",
+	    "Env": [
+	      "APP_ENV=production",
+	      "MONGO_HOST=mongodb"
+	    ],
+	    "Cmd": ["crud_mongo.py"],
+	    "Entrypoint": ["python"],
+	    "WorkingDir": "/app",
+	    "Labels": {
+	      "maintainer": "sridharan@example.com",
+	      "version": "1.0.0"
+	    },
+	    "ExposedPorts": {
+	      "80/tcp": {},
+	      "5000/tcp": {}
+	    },
+	    "Volumes": {
+	      "/data": {}
+	    },
+	    "Healthcheck": {
+	      "Test": ["CMD-SHELL", "curl --fail http://localhost:5000/health || exit 1"]
+	    },
+	    "StopSignal": "SIGTERM"
+	  },
+	  "rootfs": {
+	    "type": "layers",
+	    "diff_ids": [
+	      "sha256:...."  // Each corresponds to a layer.tar
+	    ]
+	  },
+	  "history": [
+	    {
+	      "created_by": "RUN /bin/bash -c apt-get update && apt-get install -y curl"
+	    },
+	    {
+	      "created_by": "RUN /bin/bash -c useradd -ms /bin/bash sridharan"
+	    },
+	    ...
+	  ]
+	}
+
+manifest.json (Index and Loader Instructions)
+	• Serves as the table of contents for the Docker image
+	• Lists all the layers (in order) and references the config.json
+
+	Key Information Stored
+	• Layers – Lists the ordered set of layer tarballs (e.g., sha256:<hash>/layer.tar) that make up the image filesystem
+	• Config Reference – Points to the associated config.json file (by digest hash)
+	• Repository Tags – Contains the image name and tag (e.g., imagename:tag) used to refer to this image
+
+	[
+	  {
+	    "Config": "config.json",
+	    "RepoTags": ["my-custom-image:latest"],
+	    "Layers": [
+	      "layer1/layer.tar",
+	      "layer2/layer.tar",
+	      ...
+	    ]
+	  }
+	]
+	
+layer.tar (Actual File System)
+	• Contains the actual filesystem contents for a given image layer
+	• Each layer.tar holds
+		○ Newly added files
+		○ Modified files
+		○ Deletion markers (whiteout files)
+
+Key Details
+	• It is a tar archive (not zipped) representing a diff of the filesystem from the previous layer
+	• When the image is built, multiple layer.tar files are stacked using a Union Filesystem to form the full container filesystem
+	• Each instruction in the Dockerfile (e.g., RUN, COPY, ADD) typically creates one such layer
+	Note: It is a .tar, not a .zip — it's not compressed unless Docker uses compression (like gzip) explicitly, which isn't common by default in docker save
+layer.tar = filesystem snapshot for that layer → used by Docker to build the final root (/) of the container
+
+	• If the Dockerfile contains
+	  FROM scratch
+          COPY sample.txt /sample.txt
+	• Then the layer.tar inside the image will contain
+	  sample.txt   ← This file will be extracted to /sample.txt inside the container
+	• At runtime, Docker unpacks the layer into a virtual root filesystem like
+	  /
+          └── sample.txt
+
+How Docker Image and Container Layers Work
+	• After a Docker image is built, it consists of
+		○ manifest.json
+		○ config.json
+		○ One or more layer.tar files
+	• When a container is created from an image
+		○ Docker stacks all the read-only image layers using a union filesystem
+		○ A writable top layer (container layer) is added on top to capture any changes made during container runtime
+
+LAYER
+Incremental & Immutable (Image build)
+	• Each instruction in a Dockerfile creates a new image layer
+	• Once a layer is created, it is immutable (cannot be modified)
+	• Any new changes are added in a new layer on top of the existing ones
+
+Each new Image Layer Stores Only the Filesystem Differences (Diffs) (Image build)
+	• It contains only the changes made in that specific layer
+		○ Newly added files
+		○ Modified files
+		○ Deleted files (represented internally by whiteout files)
+	• It does not duplicate the entire contents of the previous layer. Instead, Docker uses a union filesystem to present a combined view of all layers
+
+Docker Uses a Union Filesystem to Present a Merged View of All Layers (container creation)
+	• Docker uses union filesystems (such as OverlayFS, AUFS, or btrfs) to stack multiple image layers into a single, unified view
+	• The container sees a merged (union) view of all these layers, where:
+		○ Higher layers override files from lower layers (this is called layer overriding)
+	• Only the topmost layer (the container layer) is mutable (writable) and is created during runtime of container creation
+		○ All other underlying image layers are read-only and are created during image build
+	
+Deleting a File in a Layer Only Hides It from the Final View (container creation)
+	• When a file is "deleted" in a new image layer
+		○ It is not physically removed from the lower (previous) layers
+		○ Instead, Docker creates a special whiteout file in the new layer
+	• This whiteout file tells the Union File System to hide the file from the final merged view
+		○ As a result, the file appears deleted inside the container, even though it still exists in lower layers
+
+ Layer caching = faster builds (container creation)
+	• Docker caches image layers to avoid rebuilding steps that haven’t changed
+	• If the Dockerfile instructions and build context (files in scope) remain unchanged up to a certain line
+		○ Docker will reuse the cached layers
+		○ This makes builds significantly faster and more efficient
+		○ Only when an instruction or file changes, Docker rebuilds that layer and all layers after it
+
+Operations That Occur in Docker's Writable (Mutable) Container Layer
+ File Creation -> New files are written only in the mutable layer
+	
+ File Modification -> The file is copied from the lower layer to the mutable layer (copy-on-write), then modified there
+	
+ File Deletion -> A whiteout file is created to mask (hide) the file from the lower layers
+	
+ Directory Creation -> Created directly in the mutable layer
+	
+ Log files -> Any runtime logs generated in the container are written here
+	
+ App-generated temp/cache files -> Written and updated here
+	
+ Package installations(if done inside the  running container) -> All new packages/files go into the writable layer
+	
+ Environment variables set at runtime -> Stored in memory, but impact config behaviour within the container
+	
+ File permission changes -> These changes are tracked in this layer, not in the base image
+
+NETWORK
+Bridge Network (default for user-defined)
+	• Type: bridge
+	• Scope: Single host
+	• Use Case: Used for inter-container communication on the same host
+	• Behaviour
+		○ Each container gets a private IP
+		○ Containers can communicate using container names
+		○ External systems can connect via published ports (-p or ports: in Compose)
+	• Default bridge: Automatically created (bridge), but limited (no name resolution)
+	• User-defined bridge: Better isolation, name resolution, and custom subnet support
+Recommended for most multi-container apps on a single host
+
+networks:
+  my_bridge:
+    driver: bridge
+
+Host Network
+	• Type: host
+	• Scope: Single host
+	• Use Case: Max performance needed, or avoid port mapping
+	• Behaviour
+		○ The container shares the host’s network stack
+		○ No isolation: container uses the host's IP address and ports directly
+		○ Only available on Linux
+Good for performance-critical or system-level apps (like monitoring agents)
+
+networks:
+  host_net:
+    driver: host
+
+None Network
+	• Type: none
+	• Scope: Isolated
+	• Use Case: Fully isolated container, with no network access at all
+	• Behaviour
+		○ No internet access
+		○ No communication with other containers
+		○ Useful for security or manual network configuration
+Best for completely isolated workloads or debugging
+
+networks:
+  none_net:
+    driver: none
+
+Overlay Network (Swarm-only)
+	• Type: overlay
+	• Scope: Multiple hosts (clustered)
+	• Use Case: Needed when running Docker Swarm to allow containers on different hosts to communicate
+	• Behaviour
+		○ Requires Docker Swarm mode
+		○ Creates an encrypted mesh network across multiple Docker hosts
+		○ Containers can talk across nodes as if on the same network
+Use when deploying a distributed app across multiple machines
+
+docker network create --driver overlay my_overlay
+
+Macvlan Network
+	• Type: macvlan
+	• Scope: Single host
+	• Use Case: Give containers real IPs on the local physical network (LAN)
+	• Behaviour
+		○ Each container gets an IP address from your LAN (not from Docker subnet)
+		○ Appears as a physical device on your network
+		○ Can be used to interact with external systems (printers, legacy apps, etc.)
+Useful for legacy apps or network-level integration
+
+docker network create -d macvlan \
+  --subnet=192.168.1.0/24 \
+  --gateway=192.168.1.1 \
+  -o parent=eth0 my_macvlan_net

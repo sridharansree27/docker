@@ -1,0 +1,149 @@
+version: '3.8'
+name: app
+
+#####
+# VOLUMES SECTION
+#####
+volumes:
+  mongo_data:     # Reference or volume name used inside services (acts as an alias)
+    name: mongo_data_vol     # Actual name assigned to the volume on the host (persistent across Compose runs)
+    driver: local     # Uses Docker's local volume (default)
+    # In Docker, a local volume is the default type of volume managed by Docker and stored on the host machine's local filesystem
+    driver_opts:
+      type: none     # No special filesystem type (like NFS); this is a direct path
+      device: ./mongo-data     # Path on the host machine to bind mount (relative to the Compose file)
+      o: bind     # Specifies this is a bind mount (host folder ./mongo-data mapped into container)
+
+  named_volume:     # Named volume (Docker-managed)
+  
+  external_volume:     # External volume (must exist beforehand)
+    external: true     # This tells DockerCompose NOT to create it
+
+#####
+# NETWORKS SECTION
+#####
+networks:
+  mongo_net:     # Custom user-defined network name, referenced in services
+    driver: bridge     # Use Docker's bridge network driver (default for user-defined networks)
+    attachable: true     # Allows external containers (not defined in docker-compose) to connect to this network by docker run -it --network mongo_net container
+    ipam:     # IP Address Management block for setting custom subnet or IP ranges
+      config:     # Configuration list for IPAM
+        - subnet: 172.28.0.0/16     # Define the range of IP addresses Docker can assign to containers in this network
+
+  host_net:     # Host network (only supported on Linux)
+    driver: host
+
+  none_net:     # No networking (completely isolated)
+    driver: none
+
+#####
+# CONFIGS SECTION
+# The configs block defines configuration files (like .conf, .env, .json, etc.) that you want to inject into containers in a controlled and secure way
+# This is useful for externalizing config data, similar to how you use volumes for data and secrets for sensitive values (like passwords)
+# You must manually create config file. DockerCompose will not create it for you
+#####
+configs:
+  sample_config:     # This is the name used to reference the config inside service
+    file: ./config.txt     # This is the actual file path on the host
+
+#####
+# SECRETS SECTION
+# A secret is a file containing sensitive information that you want to inject into a container securely and privately — without hardcoding it into your Dockerfile, docker-compose.yml, or environment variables
+# You must manually create the secrets folder and the secret file inside it. DockerCompose will not create it for you
+#####
+secrets:
+  mongo_root_password:     # Name of the secret (used later in services)
+    file: ./secrets/mongo_root_password.txt     # Path to the actual file on the host
+
+# A secret named `mongo_root_password` will be defined
+# Its content is sourced from `./secrets/mongo_root_password.txt` on the host machine
+# This file must exist beforehand and should contain only the password (e.g., myStrongRootPassword) without any extra whitespace or formatting
+
+#####
+# SERVICES SECTION
+#####
+services:
+
+  #####
+  # MONGODB CONTAINER
+  #####
+  mongodb:
+    image: mongo
+    container_name: mongodb
+    restart: unless-stopped
+    networks:
+      mongo_net:
+        ipv4_address: 172.28.0.10
+    volumes:
+      - mongo_data:/data/db     # Bind mount
+     # - named_volume:/data/db     # Named volume (Docker automatically creates a named volume with the name specified in the named_volume declaration on the host and mounts it to the container's /data/db directory)
+     # - /data/db     # Anonymous volume (Docker automatically creates an anonymous volume on the host with a randomly generated name and maps it to the container's /data/db directory)
+     # - external_volume:/data/db     # External volume (We need to manually create external_volume on the host beforehand, and Docker maps that existing external volume to /data/db inside the container)
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+    secrets:
+      - mongo_root_password
+    configs:
+      - source: sample_config     # Name defined above
+        target: /etc/sample_config.conf     # path inside the container to place the config file
+    hostname: mongo-host
+    domainname: mongo.local
+
+  #####
+  # MONGO-EXPRESS CONTAINER
+  #####
+  mongo-express:
+    image: mongo-express
+    container_name: mongo-express
+    restart: always
+    ports:
+      - "8081:8081"
+    depends_on:
+      - mongodb
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD_FILE: /run/secrets/mongo_root_password
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_BASICAUTH_USERNAME: root
+      ME_CONFIG_BASICAUTH_PASSWORD: root
+    secrets:
+      - mongo_root_password
+    networks:
+      mongo_net:
+        ipv4_address: 172.28.0.15
+
+  #####
+  # PYTHON APP CONTAINER
+  #####
+  app:
+    build:
+      context: .
+    container_name: python-app
+    depends_on:
+      - mongodb
+    networks:
+      mongo_net:
+        ipv4_address: 172.28.0.20
+    ports:
+      - "5000:5000"
+    environment:
+      MONGO_HOST: mongodb
+    volumes:
+      - ./app:/app     # bind mount for source code
+    secrets:
+      - mongo_root_password
+    entrypoint: ["python"]     # Overrides the default ENTRYPOINT
+    command: ["/app/app.py"]     # Overrides the default CMD
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 30s     # Check every 30 seconds
+      timeout: 10s     # Fail if no response in 10 seconds
+      retries: 3     # Retry 3 times before marking unhealthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
